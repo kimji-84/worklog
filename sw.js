@@ -1,6 +1,6 @@
 // 업무일지 앱: 화면 파일을 기기에 담아 두어 인터넷이 없어도 열리게 합니다.
 // 화면을 고치면 VERSION 숫자를 올려 주세요.
-const VERSION = "worklog-v1";
+const VERSION = "worklog-v2";
 const SHELL = ["./", "index.html", "manifest.webmanifest", "icons/icon-192.png", "icons/icon-512.png", "icons/apple-touch-icon.png"];
 
 self.addEventListener("install", e => {
