@@ -295,6 +295,9 @@ mark { background: var(--today); color: inherit; border-radius: 2px; padding: 0 
 .setup .info b { font-weight: 600; color: var(--ink); }
 .status { background: none; border: 0; cursor: pointer; padding: 2px 0; font: inherit; font-size: 12px; }
 .status[data-mode="error"]::before { background: var(--danger); }
+.warn { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 10px 14px; border-radius: 10px; font-size: 13.5px;
+  background: color-mix(in srgb, var(--c-event) 14%, var(--paper)); border: 1px solid color-mix(in srgb, var(--c-event) 45%, transparent); }
+.warn span { flex: 1 1 260px; min-width: 0; }
 </style>
 </head>
 <body>
@@ -312,6 +315,10 @@ mark { background: var(--today); color: inherit; border-radius: 2px; padding: 0 
       </div>
       <button class="btn" id="listBtn" type="button">지난 업무일지</button>    </div>
   </header>
+  <div class="warn" id="warnBar" hidden>
+    <span>이 기기는 구글 시트에 연결되어 있지 않습니다. 지금 쓰는 기록은 이 화면에만 남고, 다른 기기나 앱에서는 보이지 않습니다.</span>
+    <button class="btn" type="button" id="warnBtn">연결하기</button>
+  </div>
 
   <!-- 달력 화면 -->
   <section id="calView">
@@ -507,7 +514,7 @@ mark { background: var(--today); color: inherit; border-radius: 2px; padding: 0 
   const uid = () => Math.random().toString(36).slice(2, 10);
   const $ = id => document.getElementById(id);
 
-  const today = keyOf(new Date());
+  let today = keyOf(new Date());
   const JFIELDS = [["progAm", "fProgAm"], ["progPm", "fProgPm"], ["order", "fOrder"], ["note", "fNote"], ["etc", "fEtc"]];
   const state = {
     days: {},          // key -> {items:[], order:"", note:"", etc:""}
@@ -543,12 +550,15 @@ mark { background: var(--today); color: inherit; border-radius: 2px; padding: 0 
   const LS_KEY = "worklog.days.v1", LS_PEND = "worklog.pending.v1", LS_CFG = "worklog.cfg.v1", LS_LAST = "worklog.lastsync.v1";
   const lsGet = (k, d) => { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } };
   const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} };
-  function lsLoad() { const raw = lsGet(LS_KEY, {}) || {}; const out = {}; Object.keys(raw).forEach(k => { out[k] = normDay(raw[k]); }); return out; }
+  function lsLoad() { const raw = lsGet(LS_KEY, {}) || {}; const out = {}; Object.keys(raw).forEach(k => { if (/^\d{4}-\d\d-\d\d$/.test(k)) out[k] = normDay(raw[k]); }); return out; }
   const lsSaveAll = () => lsSet(LS_KEY, state.days);
   let cfg = lsGet(LS_CFG, null);                 // {u: 웹 앱 주소, k: 열쇠}
   const pending = new Set(lsGet(LS_PEND, []));   // 아직 시트에 올리지 못한 날짜
   const savePend = () => lsSet(LS_PEND, [...pending]);
   let lastSync = lsGet(LS_LAST, "");
+  const DATE_RE = /^\d{4}-\d\d-\d\d$/;
+  let seen = new Set(lsGet("worklog.seen.v1", []));   // 시트에 있는 것으로 확인된 날짜
+  const saveSeen = () => lsSet("worklog.seen.v1", [...seen]);
   const hhmm = d => pad(d.getHours()) + ":" + pad(d.getMinutes());
 
   function serialize(k, d) {
@@ -598,9 +608,9 @@ mark { background: var(--today); color: inherit; border-radius: 2px; padding: 0 
         for (const k of [...pending]) {
           if (queued.has(k)) continue;
           const d = state.days[k];
-          if (isEmptyDay(d)) await api({ action: "delete", date: k });
-          else await api({ action: "save", date: k, data: serialize(k, d) });
-          pending.delete(k); savePend();
+          if (isEmptyDay(d)) { await api({ action: "delete", date: k }); seen.delete(k); }
+          else { await api({ action: "save", date: k, data: serialize(k, d) }); seen.add(k); }
+          pending.delete(k); savePend(); saveSeen();
         }
       } while (pushAgain);
       markSynced();
@@ -615,19 +625,26 @@ mark { background: var(--today); color: inherit; border-radius: 2px; padding: 0 
       await pushPending();
       const j = await api({ action: "list" });
       const server = {};
-      (j.days || []).forEach(x => { if (x && x.date) server[x.date] = x.data; });
+      (j.days || []).forEach(x => { if (x && DATE_RE.test(x.date || "")) server[x.date] = x.data; });
       const busy = k => pending.has(k) || queued.has(k);
-      let changed = false, selChanged = false;
+      let changed = false, selChanged = false, reupload = false;
       Object.keys(server).forEach(k => {
         if (busy(k)) return;
         const nd = normDay(server[k]);
         if (JSON.stringify(nd) !== JSON.stringify(state.days[k])) { state.days[k] = nd; changed = true; if (k === state.sel) selChanged = true; }
       });
+      // 시트에 없는 날: 전에 시트에서 본 적이 있으면 다른 기기에서 지운 것이므로 지우고,
+      // 본 적이 없으면 아직 못 올린 기록이므로 절대 지우지 않고 다시 올립니다.
       Object.keys(state.days).forEach(k => {
-        if (!(k in server) && !busy(k)) { delete state.days[k]; changed = true; if (k === state.sel) selChanged = true; }
+        if (k in server || busy(k)) return;
+        if (seen.has(k)) { delete state.days[k]; changed = true; if (k === state.sel) selChanged = true; }
+        else { pending.add(k); reupload = true; }
       });
+      seen = new Set(Object.keys(server)); saveSeen();
+      if (reupload) savePend();
       lsSaveAll(); markSynced();
       if (changed) rerenderAll(selChanged);
+      if (reupload) pushPending();
     } catch (e) { syncError(e); }
     finally { pulling = false; }
   }
@@ -644,7 +661,7 @@ mark { background: var(--today); color: inherit; border-radius: 2px; padding: 0 
     if (state.screen === "list" && document.activeElement !== $("lq")) renderList();
     if (state.screen === "day" && selChanged !== false) { renderSchedule(); if (!typingInJournal()) renderJournal(); }
   }
-  const setStatus = (mode, text) => { const s = $("status"); s.dataset.mode = mode; s.textContent = text; };
+  const setStatus = (mode, text) => { const s = $("status"); s.dataset.mode = mode; s.textContent = text; $("warnBar").hidden = !!cfg; };
   const typingInJournal = () => { const a = document.activeElement; return a && a.classList && a.classList.contains("lined"); };
 
   function initStore() {
@@ -655,8 +672,20 @@ mark { background: var(--today); color: inherit; border-radius: 2px; padding: 0 
     pull();
   }
   window.addEventListener("online", () => pull());
+  // 앱을 켜 둔 채 날짜가 바뀌면(밤새 열어 둔 경우 등) '오늘'을 새 날짜로 맞춤
+  function refreshToday() {
+    const t = keyOf(new Date());
+    if (t === today) return;
+    const wasToday = state.sel === today;
+    today = t;
+    if (wasToday) state.sel = t;
+    const d = parseKey(state.sel); state.view = new Date(d.getFullYear(), d.getMonth(), 1);
+    renderMonth();
+    if (state.screen === "day") renderDayScreen();
+  }
+  setInterval(refreshToday, 60000);
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") pull();
+    if (document.visibilityState === "visible") { refreshToday(); pull(); }
     else [...queued].forEach(k => flush(k));   // 앱을 내릴 때 입력 중이던 내용 바로 저장
   });
   setInterval(() => { if (document.visibilityState === "visible") pull(); }, 120000);
@@ -681,6 +710,7 @@ mark { background: var(--today); color: inherit; border-radius: 2px; padding: 0 
   }
   const closeSetup = () => { $("setupOv").hidden = true; };
   $("status").addEventListener("click", openSetup);
+  $("warnBtn").addEventListener("click", openSetup);
   $("suLater").addEventListener("click", closeSetup);
   $("suClose").addEventListener("click", closeSetup);
   $("suSync").addEventListener("click", async () => { setStatus("local", "동기화 중…"); await pull(); openSetup(); });
